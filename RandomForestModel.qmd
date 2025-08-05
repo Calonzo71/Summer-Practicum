@@ -1,0 +1,203 @@
+---
+title: "Random Forest Model"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+df <- read_csv("C:/Users/jcalonzo/Desktop/Carlos/DestAirport_withblocks.csv")
+
+```
+
+You can add options to executable code like this
+
+```{r}
+
+Model_data <- df %>%
+  select(ArrDel15, Operating_Airline, Distance, Dest, TIME_OF_DAY) %>%
+  mutate(
+    Operating_Airline = as.factor(Operating_Airline),
+    Dest = as.factor(Dest),
+    TIME_OF_DAY = as.factor(TIME_OF_DAY),
+    ArrDel15 = as.factor(ArrDel15)
+  ) %>%  mutate(across(where(is.numeric), ~replace_na(., mean(., na.rm = TRUE))))
+
+```
+
+```{r}
+cor(Model_data)
+```
+
+```{r}
+set.seed(123)
+
+train_indices <- createDataPartition(
+  y = Model_data$ArrDel15,
+  p = 0.7,
+  list = FALSE,
+  times = 1
+)
+
+train_data <- Model_data[train_indices, ]
+test_data <- Model_data[-train_indices, ]
+table(test_data$DepDel15)
+
+```
+
+```{r}
+
+# NEW SPLIT DATA *************************************************************
+# Assuming Model_data is already loaded and DepDel15 is your target variable
+
+# --- 1. Initial Split: Create an 80/20 split (Train+Validation vs. Test) ---
+set.seed(123) # Use your preferred seed for reproducibility of the first split
+train_val_indices <- createDataPartition(
+  y = Model_data$ArrDel15,
+  p = 0.8,    # 80% for training + validation
+  list = FALSE,
+  times = 1
+)
+
+train_val_data <- Model_data[train_val_indices, ]
+test_data <- Model_data[-train_val_indices, ] # The remaining 20% is your test set
+
+# --- 2. Second Split: Divide Train+Validation into 75/25 (60/20 overall) ---
+# Calculate the 'p' for this step: 60% (desired train) / 80% (train_val_data size) = 0.75
+set.seed(456) # Use a different seed for reproducibility of the second split
+train_indices <- createDataPartition(
+  y = train_val_data$ArrDel15,
+  p = 0.75,   # 75% of train_val_data (which is 60% of original)
+  list = FALSE,
+  times = 1
+)
+
+train_data <- train_val_data[train_indices, ]
+validation_data <- train_val_data[-train_indices, ] # The remaining 25% of train_val_data (which is 20% of original)
+# --- 3. Verify the Splits (Important!) ---
+
+cat("Original Data Dimensions:", dim(Model_data), "\n")
+cat("Training Data Dimensions:", dim(train_data), "\n")
+cat("Validation Data Dimensions:", dim(validation_data), "\n")
+cat("Test Data Dimensions:", dim(test_data), "\n\n")
+
+cat("Number of rows in original data:", nrow(Model_data), "\n")
+cat("Number of rows in training data:", nrow(train_data), " (approx.", round(nrow(train_data)/nrow(Model_data)*100), "%)\n")
+cat("Number of rows in validation data:", nrow(validation_data), " (approx.", round(nrow(validation_data)/nrow(Model_data)*100), "%)\n")
+cat("Number of rows in test data:", nrow(test_data), " (approx.", round(nrow(test_data)/nrow(Model_data)*100), "%)\n\n")
+
+
+cat("Proportions of DepDel15 in Training Data:\n")
+print(prop.table(table(train_data$ArrDel15)))
+cat("\nProportions of DepDel15 in Validation Data:\n")
+print(prop.table(table(validation_data$ArrDel15)))
+cat("\nProportions of DepDel15 in Test Data:\n")
+print(prop.table(table(test_data$ArrDel15)))
+
+# You can also check the total counts
+cat("\nCounts of DepDel15 in Test Data:\n")
+print(table(test_data$ArrDel15))
+
+#Load proper vars to train and test  *************************************************************
+train_data <- train_data |>
+  dplyr::mutate(
+    dplyr::across(c(Operating_Airline, Dest, TIME_OF_DAY), as.factor) #deleted origin here 
+  )
+test_data <- test_data |>
+  dplyr::mutate(
+    dplyr::across(c(Operating_Airline, Dest, TIME_OF_DAY), as.factor) #deleted origin here 
+  )
+validation_data <- validation_data |>
+  dplyr::mutate(
+    dplyr::across(c(Operating_Airline, Dest, TIME_OF_DAY), as.factor) #deleted origin here 
+  )
+train_data<- drop_na(train_data)
+test_data<- drop_na(test_data)
+validation_data <- drop_na(validation_data)
+
+#Resampling using ROSE  *************************************************************
+X <- train_data[, setdiff(names(train_data), "ArrDel15")]
+y <- as.factor(train_data$ArrDel15)
+X_encoded <- model.matrix(~ . - 1, data = X)  # removes intercept column
+X_encoded <- as.data.frame(X_encoded)
+
+data_for_rose <- cbind(X_encoded, target = y)
+smote_rose_result <- ROSE(target ~ ., data = data_for_rose, N = 977225, p = 0.5) # Example: N=desired total samples, p=desired minority proportion
+smote_data <- smote_rose_result$data
+table(smote_data$target)
+smote_data <- smote_data %>% select(-Operating_AirlineAA) #drop for reference level
+```
+
+```{r}
+library(tuneRanger)
+library(ranger)
+library(mlr3)
+library(mlr3learners)
+library(mlr)
+library(caret)
+
+```
+
+```{r}
+set.seed(123)
+sample_idx <- sample(nrow(smote_data), 20000)  # or 50000, depending on speed
+tune_data  <- smote_data[sample_idx, ]
+tune_data <- tune_data %>% drop_na()
+task <- makeClassifTask(data = tune_data, target = "target")
+#estimateTimeTuneRanger(task)
+
+```
+
+```{r}
+tuned <- tuneRanger(
+  task = task,
+  measure = list(auc),
+  num.trees = 100,         # or more for better results
+  num.threads = 2,
+  iters = 70   )            # number of tuning iterations
+
+
+```
+
+```{r}
+train_data <- train_data %>% drop_na()
+final_rf <- ranger(
+  formula = ArrDel15 ~ .,
+  data = train_data,
+  num.trees = 500,  # more trees now that you're training final model
+  mtry = tuned$recommended.pars$mtry,
+  min.node.size = tuned$recommended.pars$min.node.size,
+  sample.fraction = tuned$recommended.pars$sample.fraction,
+  splitrule = "gini",
+  class.weights = c("0" = 1,"1"= 10),
+  respect.unordered.factors = "order",
+  probability = TRUE
+)
+```
+
+```{r}
+rf_pred  <- predict(final_rf, data = test_data)
+pred_prob <- rf_pred$predictions[, "1"]
+pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+
+```
+
+```{r}
+confusionMatrix(factor(pred_class, levels = c(0,1)),
+                factor(test_data$ArrDel15, levels = c(0,1)),
+                positive = "1")
+
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
